@@ -9,7 +9,7 @@ type Drink = {
   abv: number;
   startTime: number;
   endTime: number | null;
-  consumedWithFood?: boolean; 
+  consumedWithFood?: boolean; // <-- Just add this line back!
   stomachContent?: number;    
 };
 
@@ -80,8 +80,14 @@ export default function DashboardScreen() {
     if (userRegion === 'UK' || userRegion === 'USA') limit = 0.08;
     setDrivingLimit(limit);
 
-    // 1. SAFETY UPDATE: We no longer exit if weight is 0. We just use 75kg as a fallback.
-    if (consumedDrinks.length === 0) {
+    // --- THE FIX: Filter out historical data before doing the math! ---
+    const twentyFourHoursAgo = Date.now() - (24 * 60 * 60 * 1000);
+    const recentDrinks = consumedDrinks.filter(d => {
+      const endTimeToUse = d.endTime ? d.endTime : Date.now();
+      return endTimeToUse > twentyFourHoursAgo;
+    });
+
+    if (recentDrinks.length === 0) {
       setCurrentBAC('0.000');
       setProjectedPeak('0.000');
       setBacColor('#28a745'); 
@@ -94,12 +100,11 @@ export default function DashboardScreen() {
     const bacPerGram = 1 / (weightToUse * r * 10);
     const burnPerMinute = 0.015 / 60; 
 
-    // Safely grab the very first drink's start time
-    let earliestTime = consumedDrinks[0].startTime;
+    let earliestTime = recentDrinks[0].startTime;
     let latestAbsorptionTime = earliestTime; 
     let totalGrams = 0;
     
-    consumedDrinks.forEach(d => { 
+    recentDrinks.forEach(d => { 
       if (d.startTime < earliestTime) earliestTime = d.startTime; 
       totalGrams += d.volume * (d.abv / 100) * 0.789;
 
@@ -115,15 +120,12 @@ export default function DashboardScreen() {
     let currentActualBAC = 0;
     let peakSimulatedBAC = 0;
     const now = Date.now();
-
-    // 2. CRITICAL BUG FIX: The loop must always run at least up to the current time, 
-    // even if all drinks were fully absorbed hours ago!
     const loopEnd = Math.max(now, latestAbsorptionTime);
 
     for (let time = earliestTime; time <= loopEnd; time += 60000) {
       let absorbedThisMinute = 0;
       
-      consumedDrinks.forEach(drink => {
+      recentDrinks.forEach(drink => {
         const stomachVal = drink.stomachContent !== undefined ? drink.stomachContent : (drink.consumedWithFood ? 1 : 0);
         const absorptionDelayMins = 30 + (stomachVal * 60);
         
@@ -255,20 +257,20 @@ export default function DashboardScreen() {
     );
   };
 
+  // Only show the 10 most recent drinks on the dashboard so it doesn't get infinitely long
+  const sortedDrinks = [...consumedDrinks].sort((a, b) => b.startTime - a.startTime).slice(0, 10);
+  const activeDrinkCount = consumedDrinks.filter(drink => drink.endTime === null).length;
+
   const applyPreset = (presetName: string, presetVolume: string, presetAbv: string) => {
     setDrinkName(presetName); 
     setDrinkVolume(presetVolume); 
     setDrinkAbv(presetAbv);
   };
 
-  const sortedDrinks = [...consumedDrinks].sort((a, b) => b.startTime - a.startTime);
-  const activeDrinkCount = consumedDrinks.filter(drink => drink.endTime === null).length;
-
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Drink Dashboard</Text>
       
-      {/* 3. NEW UI: Warning banner if profile is empty */}
       {userWeight === 0 && (
         <View style={styles.missingProfileBanner}>
           <Text style={styles.missingProfileText}>⚠️ Go to Profile and set Weight for accurate BAC</Text>
@@ -292,7 +294,7 @@ export default function DashboardScreen() {
 
       <Button title="+ Add Drink" onPress={() => setIsModalVisible(true)} color="#007BFF" />
       
-      <Text style={styles.subtitle}>Drinks Today:</Text>
+      <Text style={styles.subtitle}>Recent Drinks:</Text>
       
       {activeDrinkCount > 0 && (
         <View style={styles.activeWarningBanner}>
@@ -384,11 +386,8 @@ export default function DashboardScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 20, backgroundColor: '#f8f9fa' },
   title: { fontSize: 24, fontWeight: 'bold', marginTop: 30, textAlign: 'center' },
-  
-  // New styles for the warning banner
   missingProfileBanner: { backgroundColor: '#f8d7da', padding: 10, borderRadius: 8, marginBottom: 10, borderWidth: 1, borderColor: '#f5c6cb' },
   missingProfileText: { color: '#721c24', fontWeight: 'bold', textAlign: 'center', fontSize: 13 },
-
   bacContainer: { backgroundColor: '#343a40', padding: 20, borderRadius: 15, alignItems: 'center', marginBottom: 20, marginTop: 10 },
   bacLabel: { color: '#adb5bd', fontSize: 16, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 1 },
   bacNumber: { fontSize: 48, fontWeight: 'bold', marginTop: 5 },

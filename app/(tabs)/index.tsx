@@ -9,6 +9,8 @@ type Drink = {
   abv: number;
   startTime: number;
   endTime: number | null;
+  consumedWithFood?: boolean; 
+  stomachContent?: number;    
 };
 
 const PRESET_DRINKS = [
@@ -37,11 +39,13 @@ export default function DashboardScreen() {
   
   const [drivingLimit, setDrivingLimit] = useState(0.05);
   const [timeToSober, setTimeToSober] = useState('0h 0m (Sober)');
+  const [projectedPeak, setProjectedPeak] = useState('0.000');
 
   const [isModalVisible, setIsModalVisible] = useState(false);
   const [drinkName, setDrinkName] = useState(''); 
   const [drinkVolume, setDrinkVolume] = useState('');
   const [drinkAbv, setDrinkAbv] = useState('');
+  const [stomachContent, setStomachContent] = useState(0);
 
   useEffect(() => {
     loadDrinksAndSettings();
@@ -76,34 +80,57 @@ export default function DashboardScreen() {
     if (userRegion === 'UK' || userRegion === 'USA') limit = 0.08;
     setDrivingLimit(limit);
 
-    if (consumedDrinks.length === 0 || userWeight === 0) {
+    // 1. SAFETY UPDATE: We no longer exit if weight is 0. We just use 75kg as a fallback.
+    if (consumedDrinks.length === 0) {
       setCurrentBAC('0.000');
+      setProjectedPeak('0.000');
       setBacColor('#28a745'); 
       setTimeToSober('0h 0m (Sober)');
       return;
     }
 
+    const weightToUse = userWeight > 0 ? userWeight : 75;
     const r = userGender.toUpperCase().startsWith('F') ? 0.55 : 0.68;
-    const bacPerGram = 1 / (userWeight * r * 10);
+    const bacPerGram = 1 / (weightToUse * r * 10);
     const burnPerMinute = 0.015 / 60; 
 
-    let earliestTime = Date.now();
+    // Safely grab the very first drink's start time
+    let earliestTime = consumedDrinks[0].startTime;
+    let latestAbsorptionTime = earliestTime; 
     let totalGrams = 0;
     
     consumedDrinks.forEach(d => { 
       if (d.startTime < earliestTime) earliestTime = d.startTime; 
       totalGrams += d.volume * (d.abv / 100) * 0.789;
+
+      const stomachVal = d.stomachContent !== undefined ? d.stomachContent : (d.consumedWithFood ? 1 : 0);
+      const absorptionDelayMins = 30 + (stomachVal * 60);
+      const drinkingDurationMs = d.endTime ? (d.endTime - d.startTime) : (30 * 60000);
+      const finishAbsorbing = d.startTime + drinkingDurationMs + (absorptionDelayMins * 60000);
+      
+      if (finishAbsorbing > latestAbsorptionTime) latestAbsorptionTime = finishAbsorbing;
     });
 
     let simulatedBAC = 0;
+    let currentActualBAC = 0;
+    let peakSimulatedBAC = 0;
     const now = Date.now();
 
-    for (let time = earliestTime; time <= now; time += 60000) {
+    // 2. CRITICAL BUG FIX: The loop must always run at least up to the current time, 
+    // even if all drinks were fully absorbed hours ago!
+    const loopEnd = Math.max(now, latestAbsorptionTime);
+
+    for (let time = earliestTime; time <= loopEnd; time += 60000) {
       let absorbedThisMinute = 0;
+      
       consumedDrinks.forEach(drink => {
+        const stomachVal = drink.stomachContent !== undefined ? drink.stomachContent : (drink.consumedWithFood ? 1 : 0);
+        const absorptionDelayMins = 30 + (stomachVal * 60);
+        
         const drinkingDurationMs = drink.endTime ? (drink.endTime - drink.startTime) : (30 * 60000);
-        const totalAbsorptionTimeMs = drinkingDurationMs + (30 * 60000); 
+        const totalAbsorptionTimeMs = drinkingDurationMs + (absorptionDelayMins * 60000); 
         const totalAbsorptionMinutes = totalAbsorptionTimeMs / 60000;
+        
         const grams = drink.volume * (drink.abv / 100) * 0.789;
         const bacContributionPerMinute = (grams * bacPerGram) / totalAbsorptionMinutes;
 
@@ -115,9 +142,16 @@ export default function DashboardScreen() {
       simulatedBAC += absorbedThisMinute;
       simulatedBAC -= burnPerMinute;
       if (simulatedBAC < 0) simulatedBAC = 0; 
+
+      if (simulatedBAC > peakSimulatedBAC) peakSimulatedBAC = simulatedBAC;
+
+      if (time <= now) {
+        currentActualBAC = simulatedBAC;
+      }
     }
 
-    setCurrentBAC(simulatedBAC.toFixed(3));
+    setCurrentBAC(currentActualBAC.toFixed(3));
+    setProjectedPeak(peakSimulatedBAC.toFixed(3)); 
 
     const totalPossibleBAC = totalGrams * bacPerGram;
     const minutesSinceStart = (now - earliestTime) / 60000;
@@ -135,11 +169,11 @@ export default function DashboardScreen() {
       setTimeToSober(`${hours}h ${mins}m (${soberTimeString})`);
     }
 
-    if (simulatedBAC < limit * 0.5) {
+    if (currentActualBAC < limit * 0.5) {
       setBacColor('#28a745'); 
-    } else if (simulatedBAC < limit) {
+    } else if (currentActualBAC < limit) {
       setBacColor('#ffc107'); 
-    } else if (simulatedBAC < limit * 2) {
+    } else if (currentActualBAC < limit * 2) {
       setBacColor('#dc3545'); 
     } else {
       setBacColor('#d63384'); 
@@ -153,13 +187,19 @@ export default function DashboardScreen() {
       volume: parseFloat(drinkVolume) || 0, 
       abv: parseFloat(drinkAbv) || 0,    
       startTime: Date.now(),     
-      endTime: null,             
+      endTime: null,
+      stomachContent: stomachContent 
     };
+    
     const updatedDrinksList = [...consumedDrinks, newDrink];
     setConsumedDrinks(updatedDrinksList);
     try {
       await AsyncStorage.setItem('drinkHistory', JSON.stringify(updatedDrinksList));
-      setDrinkName(''); setDrinkVolume(''); setDrinkAbv(''); setIsModalVisible(false);
+      setDrinkName(''); 
+      setDrinkVolume(''); 
+      setDrinkAbv(''); 
+      setStomachContent(0); 
+      setIsModalVisible(false);
     } catch (error) {}
   };
 
@@ -190,6 +230,12 @@ export default function DashboardScreen() {
     const startString = item.startTime ? new Date(item.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Unknown';
     const endString = item.endTime ? new Date(item.endTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Drinking...';
     const stdDrinks = calculateStandardDrinks(item.volume, item.abv, userRegion);
+    
+    const stomachVal = item.stomachContent !== undefined ? item.stomachContent : (item.consumedWithFood ? 1 : 0);
+    let foodStatusText = '⏳ Empty Stomach';
+    if (stomachVal === 0.25) foodStatusText = '🥪 Light Snack';
+    if (stomachVal === 0.5) foodStatusText = '🌮 Moderate Meal';
+    if (stomachVal === 1) foodStatusText = '🍔 Full Meal';
 
     return (
       <TouchableOpacity onLongPress={() => deleteDrink(item.id)} delayLongPress={500}>
@@ -197,6 +243,8 @@ export default function DashboardScreen() {
           <Text style={styles.drinkName}>{item.name}</Text>
           <Text style={styles.drinkDetails}>{item.volume}ml • {item.abv}% ABV • {stdDrinks} Std Drinks</Text>
           <Text style={styles.timeDetails}>Started: {startString} {item.endTime ? `• Finished: ${endString}` : ''}</Text>
+          <Text style={styles.foodDetails}>{foodStatusText}</Text>
+          
           {item.endTime === null && (
             <View style={styles.finishButtonContainer}>
               <Button title="Finish Drink" color="#ff9800" onPress={() => finishDrink(item.id)} />
@@ -208,19 +256,25 @@ export default function DashboardScreen() {
   };
 
   const applyPreset = (presetName: string, presetVolume: string, presetAbv: string) => {
-    setDrinkName(presetName); setDrinkVolume(presetVolume); setDrinkAbv(presetAbv);
+    setDrinkName(presetName); 
+    setDrinkVolume(presetVolume); 
+    setDrinkAbv(presetAbv);
   };
 
-  // 1. REVERSE THE ORDER: Sort the array so the newest drinks are always at the top
   const sortedDrinks = [...consumedDrinks].sort((a, b) => b.startTime - a.startTime);
-
-  // 2. CHECK FOR UNFINISHED DRINKS: Count how many drinks have a null endTime
   const activeDrinkCount = consumedDrinks.filter(drink => drink.endTime === null).length;
 
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Drink Dashboard</Text>
       
+      {/* 3. NEW UI: Warning banner if profile is empty */}
+      {userWeight === 0 && (
+        <View style={styles.missingProfileBanner}>
+          <Text style={styles.missingProfileText}>⚠️ Go to Profile and set Weight for accurate BAC</Text>
+        </View>
+      )}
+
       <View style={styles.bacContainer}>
         <Text style={styles.bacLabel}>Estimated BAC</Text>
         <Text style={[styles.bacNumber, { color: bacColor }]}>{currentBAC}%</Text>
@@ -228,6 +282,10 @@ export default function DashboardScreen() {
         <View style={styles.bacDetailsRow}>
           <Text style={styles.bacDetailText}>Limit: {drivingLimit.toFixed(2)}%</Text>
           <Text style={styles.bacDetailTextDivider}>|</Text>
+          <Text style={styles.bacDetailText}>Peak: {projectedPeak}%</Text>
+        </View>
+
+        <View style={styles.bacDetailsRow}>
           <Text style={styles.bacDetailText}>Sober in: {timeToSober}</Text>
         </View>
       </View>
@@ -236,7 +294,6 @@ export default function DashboardScreen() {
       
       <Text style={styles.subtitle}>Drinks Today:</Text>
       
-      {/* 3. SHOW WARNING: Only displays if you have at least 1 unfinished drink */}
       {activeDrinkCount > 0 && (
         <View style={styles.activeWarningBanner}>
           <Text style={styles.activeWarningText}>
@@ -247,7 +304,6 @@ export default function DashboardScreen() {
 
       <Text style={styles.hintText}>(Press and hold a drink to delete it)</Text>
 
-      {/* 4. FEED THE REVERSED LIST INTO THE FLATLIST */}
       <FlatList 
         data={sortedDrinks} 
         keyExtractor={(item) => item.id} 
@@ -259,6 +315,7 @@ export default function DashboardScreen() {
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <Text style={styles.modalTitle}>Log a Drink</Text>
+            
             <Text style={styles.label}>Quick Select:</Text>
             <View style={styles.presetGrid}>
               {PRESET_DRINKS.map((drink, index) => (
@@ -267,12 +324,52 @@ export default function DashboardScreen() {
                 </TouchableOpacity>
               ))}
             </View>
+            
             <Text style={styles.label}>Drink Name:</Text>
             <TextInput style={styles.input} value={drinkName} onChangeText={setDrinkName} placeholder="e.g. Beer" />
-            <Text style={styles.label}>Volume (ml):</Text>
-            <TextInput style={styles.input} keyboardType="numeric" value={drinkVolume} onChangeText={setDrinkVolume} placeholder="e.g. 330" />
-            <Text style={styles.label}>ABV (%):</Text>
-            <TextInput style={styles.input} keyboardType="numeric" value={drinkAbv} onChangeText={setDrinkAbv} placeholder="e.g. 5.0" />
+            
+            <View style={styles.inputRow}>
+              <View style={styles.halfInput}>
+                <Text style={styles.label}>Volume (ml):</Text>
+                <TextInput style={styles.input} keyboardType="numeric" value={drinkVolume} onChangeText={setDrinkVolume} placeholder="e.g. 330" />
+              </View>
+              <View style={styles.halfInput}>
+                <Text style={styles.label}>ABV (%):</Text>
+                <TextInput style={styles.input} keyboardType="numeric" value={drinkAbv} onChangeText={setDrinkAbv} placeholder="e.g. 5.0" />
+              </View>
+            </View>
+
+            <Text style={styles.label}>Stomach Content:</Text>
+            <View style={styles.presetGrid}>
+              <TouchableOpacity 
+                style={[styles.foodButton, stomachContent === 0 && styles.foodButtonActive]} 
+                onPress={() => setStomachContent(0)}
+              >
+                <Text style={[styles.foodButtonText, stomachContent === 0 && styles.foodButtonTextActive]}>Empty (0%)</Text>
+              </TouchableOpacity>
+              
+              <TouchableOpacity 
+                style={[styles.foodButton, stomachContent === 0.25 && styles.foodButtonActive]} 
+                onPress={() => setStomachContent(0.25)}
+              >
+                <Text style={[styles.foodButtonText, stomachContent === 0.25 && styles.foodButtonTextActive]}>Snack (25%)</Text>
+              </TouchableOpacity>
+              
+              <TouchableOpacity 
+                style={[styles.foodButton, stomachContent === 0.5 && styles.foodButtonActive]} 
+                onPress={() => setStomachContent(0.5)}
+              >
+                <Text style={[styles.foodButtonText, stomachContent === 0.5 && styles.foodButtonTextActive]}>Moderate (50%)</Text>
+              </TouchableOpacity>
+              
+              <TouchableOpacity 
+                style={[styles.foodButton, stomachContent === 1 && styles.foodButtonActive]} 
+                onPress={() => setStomachContent(1)}
+              >
+                <Text style={[styles.foodButtonText, stomachContent === 1 && styles.foodButtonTextActive]}>Full (100%)</Text>
+              </TouchableOpacity>
+            </View>
+
             <View style={styles.modalButtonRow}>
               <Button title="Cancel" color="#dc3545" onPress={() => setIsModalVisible(false)} />
               <Button title="Log Drink" color="#28a745" onPress={logCustomDrink} />
@@ -287,6 +384,11 @@ export default function DashboardScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 20, backgroundColor: '#f8f9fa' },
   title: { fontSize: 24, fontWeight: 'bold', marginTop: 30, textAlign: 'center' },
+  
+  // New styles for the warning banner
+  missingProfileBanner: { backgroundColor: '#f8d7da', padding: 10, borderRadius: 8, marginBottom: 10, borderWidth: 1, borderColor: '#f5c6cb' },
+  missingProfileText: { color: '#721c24', fontWeight: 'bold', textAlign: 'center', fontSize: 13 },
+
   bacContainer: { backgroundColor: '#343a40', padding: 20, borderRadius: 15, alignItems: 'center', marginBottom: 20, marginTop: 10 },
   bacLabel: { color: '#adb5bd', fontSize: 16, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 1 },
   bacNumber: { fontSize: 48, fontWeight: 'bold', marginTop: 5 },
@@ -295,25 +397,29 @@ const styles = StyleSheet.create({
   bacDetailTextDivider: { color: '#6c757d', fontSize: 14, marginHorizontal: 10 },
   subtitle: { fontSize: 18, fontWeight: 'bold', marginTop: 25, marginBottom: 5 },
   hintText: { fontSize: 12, color: '#888', marginBottom: 10, fontStyle: 'italic' },
-  
-  // New Styles for the Warning Banner
   activeWarningBanner: { backgroundColor: '#fff3cd', paddingVertical: 8, paddingHorizontal: 12, borderRadius: 6, marginBottom: 5, borderWidth: 1, borderColor: '#ffe69c' },
   activeWarningText: { color: '#856404', fontWeight: 'bold', fontSize: 14, textAlign: 'center' },
-
   list: { flex: 1 },
   drinkCard: { backgroundColor: '#ffffff', padding: 15, borderRadius: 10, marginBottom: 10, borderWidth: 1, borderColor: '#e0e0e0' },
   activeDrinkCard: { borderColor: '#ff9800', borderWidth: 2, backgroundColor: '#fff9e6' },
   drinkName: { fontSize: 18, fontWeight: 'bold' },
   drinkDetails: { fontSize: 14, color: '#666666', marginTop: 5 },
   timeDetails: { fontSize: 14, color: '#17a2b8', marginTop: 5, fontWeight: '500' },
+  foodDetails: { fontSize: 13, color: '#856404', marginTop: 5, fontWeight: '600', backgroundColor: '#fff3cd', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 4, alignSelf: 'flex-start' },
   finishButtonContainer: { marginTop: 15 },
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0, 0, 0, 0.5)', justifyContent: 'center', alignItems: 'center' },
   modalContent: { backgroundColor: 'white', padding: 25, borderRadius: 15, width: '85%' },
   modalTitle: { fontSize: 22, fontWeight: 'bold', marginBottom: 20, textAlign: 'center' },
   label: { fontSize: 16, marginBottom: 5, fontWeight: '500' },
   input: { borderWidth: 1, borderColor: '#cccccc', padding: 10, marginBottom: 15, borderRadius: 8, fontSize: 16 },
-  modalButtonRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 10 },
+  inputRow: { flexDirection: 'row', justifyContent: 'space-between' },
+  halfInput: { width: '48%' },
   presetGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', marginBottom: 15 },
   presetButton: { backgroundColor: '#e9ecef', width: '48%', paddingVertical: 12, borderRadius: 8, marginBottom: 10, alignItems: 'center' },
-  presetText: { color: '#495057', fontWeight: 'bold' }
+  presetText: { color: '#495057', fontWeight: 'bold' },
+  foodButton: { backgroundColor: '#e9ecef', width: '48%', paddingVertical: 12, borderRadius: 8, marginBottom: 10, alignItems: 'center', borderWidth: 1, borderColor: '#cccccc' },
+  foodButtonActive: { backgroundColor: '#007BFF', borderColor: '#007BFF' },
+  foodButtonText: { color: '#495057', fontWeight: 'bold', fontSize: 13 },
+  foodButtonTextActive: { color: '#ffffff' },
+  modalButtonRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 10 },
 });

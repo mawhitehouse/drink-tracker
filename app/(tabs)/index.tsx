@@ -1,7 +1,8 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Notifications from 'expo-notifications';
 import React, { useEffect, useState } from 'react';
-import { Alert, Button, FlatList, Modal, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Alert, Button, Dimensions, FlatList, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { LineChart } from 'react-native-chart-kit';
 
 type Drink = {
   id: string;
@@ -10,7 +11,7 @@ type Drink = {
   abv: number;
   startTime: number;
   endTime: number | null;
-  consumedWithFood?: boolean; // <-- Just add this line back!
+  consumedWithFood?: boolean; 
   stomachContent?: number;    
 };
 
@@ -20,6 +21,8 @@ const PRESET_DRINKS = [
   { name: 'Glass of Wine', volume: '150', abv: '12.5' },
   { name: 'Shot (Spirits)', volume: '30', abv: '40.0' },
 ];
+
+const screenWidth = Dimensions.get('window').width;
 
 const calculateStandardDrinks = (volume: number, abv: number, region: string) => {
   const gramsOfAlcohol = volume * (abv / 100) * 0.789;
@@ -32,17 +35,22 @@ const calculateStandardDrinks = (volume: number, abv: number, region: string) =>
 export default function DashboardScreen() {
   const [consumedDrinks, setConsumedDrinks] = useState<Drink[]>([]);
   const [userRegion, setUserRegion] = useState('NZ/AU');
-  
   const [userWeight, setUserWeight] = useState(0);
   const [userGender, setUserGender] = useState('M');
+  
   const [currentBAC, setCurrentBAC] = useState('0.000');
   const [bacColor, setBacColor] = useState('#28a745'); 
-  
   const [drivingLimit, setDrivingLimit] = useState(0.05);
   const [timeToSober, setTimeToSober] = useState('0h 0m (Sober)');
   const [projectedPeak, setProjectedPeak] = useState('0.000');
 
+  const [bacChartData, setBacChartData] = useState<{labels: string[], datasets: {data: number[], color?: any, withDots?: boolean}[]}>({
+    labels: ['Now'], datasets: [{ data: [0] }]
+  });
+
   const [isModalVisible, setIsModalVisible] = useState(false);
+  const [isDetailsModalVisible, setIsDetailsModalVisible] = useState(false); 
+
   const [drinkName, setDrinkName] = useState(''); 
   const [drinkVolume, setDrinkVolume] = useState('');
   const [drinkAbv, setDrinkAbv] = useState('');
@@ -60,27 +68,20 @@ export default function DashboardScreen() {
     return () => clearInterval(interval);
   }, [consumedDrinks, userWeight, userGender, userRegion]); 
 
-/// --- THE LISTENER: Catches button presses from the Lock Screen ---
   useEffect(() => {
     const subscription = Notifications.addNotificationResponseReceivedListener(response => {
       const actionId = response.actionIdentifier;
       const drinkId = response.notification.request.content.data?.drinkId as string; 
-
       if (!drinkId) return;
 
       if (actionId === 'FINISH_DRINK') {
         finishDrink(drinkId);
       } else if (actionId === 'FINISH_AND_NEW') {
-        // Trigger our new background looper!
         finishAndRepeatDrink(drinkId);
       }
     });
-
     return () => subscription.remove();
   }, []);
-
-
-
 
   const loadDrinksAndSettings = async () => {
     try {
@@ -89,13 +90,11 @@ export default function DashboardScreen() {
       const savedWeight = await AsyncStorage.getItem('userWeight');
       const savedGender = await AsyncStorage.getItem('userGender');
       
-      if (savedDrinks !== null) setConsumedDrinks(JSON.parse(savedDrinks));
-      if (savedRegion !== null) setUserRegion(savedRegion);
-      if (savedWeight !== null) setUserWeight(parseFloat(savedWeight));
-      if (savedGender !== null) setUserGender(savedGender);
-    } catch (error) {
-      Alert.alert('Error', 'Could not load data.');
-    }
+      if (savedDrinks) setConsumedDrinks(JSON.parse(savedDrinks));
+      if (savedRegion) setUserRegion(savedRegion);
+      if (savedWeight) setUserWeight(parseFloat(savedWeight));
+      if (savedGender) setUserGender(savedGender);
+    } catch (error) {}
   };
 
   const updateBACDisplay = () => {
@@ -103,7 +102,6 @@ export default function DashboardScreen() {
     if (userRegion === 'UK' || userRegion === 'USA') limit = 0.08;
     setDrivingLimit(limit);
 
-    // --- THE FIX: Filter out historical data before doing the math! ---
     const twentyFourHoursAgo = Date.now() - (24 * 60 * 60 * 1000);
     const recentDrinks = consumedDrinks.filter(d => {
       const endTimeToUse = d.endTime ? d.endTime : Date.now();
@@ -115,6 +113,7 @@ export default function DashboardScreen() {
       setProjectedPeak('0.000');
       setBacColor('#28a745'); 
       setTimeToSober('0h 0m (Sober)');
+      setBacChartData({ labels: ['Now'], datasets: [{ data: [0] }] });
       return;
     }
 
@@ -145,13 +144,13 @@ export default function DashboardScreen() {
     const now = Date.now();
     const loopEnd = Math.max(now, latestAbsorptionTime);
 
+    const minuteByMinuteMap = new Map<number, number>();
+
     for (let time = earliestTime; time <= loopEnd; time += 60000) {
       let absorbedThisMinute = 0;
-      
       recentDrinks.forEach(drink => {
         const stomachVal = drink.stomachContent !== undefined ? drink.stomachContent : (drink.consumedWithFood ? 1 : 0);
         const absorptionDelayMins = 30 + (stomachVal * 60);
-        
         const drinkingDurationMs = drink.endTime ? (drink.endTime - drink.startTime) : (30 * 60000);
         const totalAbsorptionTimeMs = drinkingDurationMs + (absorptionDelayMins * 60000); 
         const totalAbsorptionMinutes = totalAbsorptionTimeMs / 60000;
@@ -167,14 +166,18 @@ export default function DashboardScreen() {
       simulatedBAC += absorbedThisMinute;
       simulatedBAC -= burnPerMinute;
       if (simulatedBAC < 0) simulatedBAC = 0; 
-
       if (simulatedBAC > peakSimulatedBAC) peakSimulatedBAC = simulatedBAC;
+      if (time <= now) currentActualBAC = simulatedBAC;
 
-      if (time <= now) {
-        currentActualBAC = simulatedBAC;
-      }
+      minuteByMinuteMap.set(Math.floor(time / 60000) * 60000, simulatedBAC);
     }
 
+    let newColor = '#28a745';
+    if (currentActualBAC >= limit * 0.5 && currentActualBAC < limit) newColor = '#ffc107'; 
+    if (currentActualBAC >= limit && currentActualBAC < limit * 2) newColor = '#dc3545'; 
+    if (currentActualBAC >= limit * 2) newColor = '#d63384'; 
+    
+    setBacColor(newColor);
     setCurrentBAC(currentActualBAC.toFixed(3));
     setProjectedPeak(peakSimulatedBAC.toFixed(3)); 
 
@@ -182,6 +185,7 @@ export default function DashboardScreen() {
     const minutesSinceStart = (now - earliestTime) / 60000;
     const totalBurned = minutesSinceStart * burnPerMinute;
     const remainingBACToBurn = totalPossibleBAC - totalBurned;
+    let finalSoberTimeMs = now;
 
     if (remainingBACToBurn <= 0) {
       setTimeToSober('0h 0m (Sober)');
@@ -189,129 +193,101 @@ export default function DashboardScreen() {
       const remainingMinutes = remainingBACToBurn / burnPerMinute;
       const hours = Math.floor(remainingMinutes / 60);
       const mins = Math.floor(remainingMinutes % 60);
-      const soberTimeMs = now + (remainingMinutes * 60000);
-      const soberTimeString = new Date(soberTimeMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      finalSoberTimeMs = now + (remainingMinutes * 60000);
+      const soberTimeString = new Date(finalSoberTimeMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       setTimeToSober(`${hours}h ${mins}m (${soberTimeString})`);
     }
 
-    if (currentActualBAC < limit * 0.5) {
-      setBacColor('#28a745'); 
-    } else if (currentActualBAC < limit) {
-      setBacColor('#ffc107'); 
-    } else if (currentActualBAC < limit * 2) {
-      setBacColor('#dc3545'); 
+    if (remainingBACToBurn > 0 || currentActualBAC > 0) {
+      let tailBAC = simulatedBAC;
+      for (let time = loopEnd + 60000; time <= finalSoberTimeMs; time += 60000) {
+        tailBAC = Math.max(0, tailBAC - burnPerMinute);
+        minuteByMinuteMap.set(Math.floor(time / 60000) * 60000, tailBAC);
+      }
+
+      const totalDurationMs = finalSoberTimeMs - earliestTime;
+      const stepMs = Math.max(60000, totalDurationMs / 5); 
+      
+      let labels: string[] = [];
+      let data: number[] = [];
+      let limitLineData: number[] = [];
+
+      for (let i = 0; i <= 5; i++) {
+        const pointTime = earliestTime + (stepMs * i);
+        const roundedTime = Math.floor(pointTime / 60000) * 60000;
+        const bacAtPoint = minuteByMinuteMap.get(roundedTime) || 0;
+        
+        labels.push(new Date(roundedTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+        data.push(parseFloat(bacAtPoint.toFixed(3)));
+        limitLineData.push(limit); // Generate the horizontal line!
+      }
+      
+      setBacChartData({ 
+        labels, 
+        datasets: [
+          { data: data, color: () => newColor }, 
+          { data: limitLineData, color: () => `rgba(150, 150, 150, 0.7)`, withDots: false } 
+        ] 
+      });
     } else {
-      setBacColor('#d63384'); 
+      setBacChartData({ labels: ['Now'], datasets: [{ data: [0] }] });
     }
   };
 
   const logCustomDrink = async () => {
-    const newDrinkId = Date.now().toString(); // Generate ID first so we can attach it to the notification
-    
+    const newDrinkId = Date.now().toString(); 
     const newDrink = {
-      id: newDrinkId, 
-      name: drinkName || 'Unknown Drink', 
-      volume: parseFloat(drinkVolume) || 0, 
-      abv: parseFloat(drinkAbv) || 0,    
-      startTime: Date.now(),     
-      endTime: null,
-      stomachContent: stomachContent 
+      id: newDrinkId, name: drinkName || 'Unknown Drink', volume: parseFloat(drinkVolume) || 0, abv: parseFloat(drinkAbv) || 0, startTime: Date.now(), endTime: null, stomachContent: stomachContent 
     };
     
     const updatedDrinksList = [...consumedDrinks, newDrink];
     setConsumedDrinks(updatedDrinksList);
     try {
       await AsyncStorage.setItem('drinkHistory', JSON.stringify(updatedDrinksList));
-      setDrinkName(''); 
-      setDrinkVolume(''); 
-      setDrinkAbv(''); 
-      setStomachContent(0); 
+      setDrinkName(''); setDrinkVolume(''); setDrinkAbv(''); setStomachContent(0); 
       setIsModalVisible(false);
 
-      // --- NEW: Fire the Live Notification! ---
       await Notifications.scheduleNotificationAsync({
-        content: {
-          title: "🍺 Active Drink",
-          body: `You are currently drinking: ${newDrink.name}. Don't forget to finish it!`,
-          categoryIdentifier: 'ACTIVE_DRINK', // This tells Android to attach our "Finish Drink" button
-          data: { drinkId: newDrinkId },      // We hide the ID in the data so the background task knows which drink to finish
-          autoDismiss: false,                 // Try to keep it on the lock screen
-          sticky: true,
-        },
-        trigger: null, // trigger: null means "Fire it immediately"
+        content: { title: "🍺 Active Drink", body: `Drinking: ${newDrink.name}.`, categoryIdentifier: 'ACTIVE_DRINK', data: { drinkId: newDrinkId }, autoDismiss: false, sticky: true },
+        trigger: null, 
       });
-
     } catch (error) {}
   };
 
   const finishDrink = async (drinkId: string) => {
-    // CLEANUP CREW: Remove the notification from the lock screen!
     await Notifications.dismissAllNotificationsAsync();
-
-    // Use 'prevDrinks' to ensure we never overwrite data if the app was asleep
     setConsumedDrinks((prevDrinks) => {
-      const updatedList = prevDrinks.map(drink => {
-        if (drink.id === drinkId) return { ...drink, endTime: Date.now() }; 
-        return drink;
-      });
-      
+      const updatedList = prevDrinks.map(drink => drink.id === drinkId ? { ...drink, endTime: Date.now() } : drink);
       AsyncStorage.setItem('drinkHistory', JSON.stringify(updatedList)).catch(()=>{});
       return updatedList;
     });
   };
 
   const finishAndRepeatDrink = async (drinkId: string) => {
-    // 1. Clear the old notification
     await Notifications.dismissAllNotificationsAsync();
-
     try {
-      // 2. Fetch the most reliable data directly from the hard drive
       const storedData = await AsyncStorage.getItem('drinkHistory');
       if (!storedData) return;
       let history: Drink[] = JSON.parse(storedData);
 
-      // 3. Find the drink they just finished
       const drinkToRepeat = history.find((d) => d.id === drinkId);
       if (!drinkToRepeat) return;
 
-      // 4. Mark the old one as finished
       history = history.map((d) => d.id === drinkId ? { ...d, endTime: Date.now() } : d);
 
-      // 5. Create the exact duplicate
       const newDrinkId = Date.now().toString();
-      const newDrink = {
-        id: newDrinkId,
-        name: drinkToRepeat.name,
-        volume: drinkToRepeat.volume,
-        abv: drinkToRepeat.abv,
-        startTime: Date.now(),
-        endTime: null,
-        stomachContent: drinkToRepeat.stomachContent
-      };
+      const newDrink = { id: newDrinkId, name: drinkToRepeat.name, volume: drinkToRepeat.volume, abv: drinkToRepeat.abv, startTime: Date.now(), endTime: null, stomachContent: drinkToRepeat.stomachContent };
       
       history.push(newDrink);
-
-      // 6. Save back to database and safely update React State
       await AsyncStorage.setItem('drinkHistory', JSON.stringify(history));
       setConsumedDrinks(history);
 
-      // 7. Fire the NEW notification for the new drink
       await Notifications.scheduleNotificationAsync({
-        content: {
-          title: "🍺 Active Drink",
-          body: `You are currently drinking: ${newDrink.name}. Don't forget to finish it!`,
-          categoryIdentifier: 'ACTIVE_DRINK',
-          data: { drinkId: newDrinkId },
-          autoDismiss: false,
-          sticky: true,
-        },
+        content: { title: "🍺 Active Drink", body: `Drinking: ${newDrink.name}.`, categoryIdentifier: 'ACTIVE_DRINK', data: { drinkId: newDrinkId }, autoDismiss: false, sticky: true },
         trigger: null,
       });
-    } catch (error) {
-      console.error("Failed to repeat drink", error);
-    }
+    } catch (error) {}
   };
-
 
   const deleteDrink = (idToDelete: string) => {
     Alert.alert("Delete Drink", "Are you sure you want to remove this entry?", [
@@ -355,14 +331,11 @@ export default function DashboardScreen() {
     );
   };
 
-  // Only show the 10 most recent drinks on the dashboard so it doesn't get infinitely long
   const sortedDrinks = [...consumedDrinks].sort((a, b) => b.startTime - a.startTime).slice(0, 10);
   const activeDrinkCount = consumedDrinks.filter(drink => drink.endTime === null).length;
 
   const applyPreset = (presetName: string, presetVolume: string, presetAbv: string) => {
-    setDrinkName(presetName); 
-    setDrinkVolume(presetVolume); 
-    setDrinkAbv(presetAbv);
+    setDrinkName(presetName); setDrinkVolume(presetVolume); setDrinkAbv(presetAbv);
   };
 
   return (
@@ -375,47 +348,61 @@ export default function DashboardScreen() {
         </View>
       )}
 
-      <View style={styles.bacContainer}>
-        <Text style={styles.bacLabel}>Estimated BAC</Text>
-        <Text style={[styles.bacNumber, { color: bacColor }]}>{currentBAC}%</Text>
-        
-        <View style={styles.bacDetailsRow}>
-          <Text style={styles.bacDetailText}>Limit: {drivingLimit.toFixed(2)}%</Text>
-          <Text style={styles.bacDetailTextDivider}>|</Text>
-          <Text style={styles.bacDetailText}>Peak: {projectedPeak}%</Text>
-        </View>
+      <TouchableOpacity activeOpacity={0.8} onPress={() => setIsDetailsModalVisible(true)}>
+        <View style={[styles.bacContainer, { borderColor: bacColor, borderWidth: 2 }]}>
+          <Text style={styles.bacLabel}>Estimated BAC</Text>
+          <Text style={[styles.bacNumber, { color: bacColor }]}>{currentBAC}%</Text>
+          
+          <View style={styles.bacDetailsRow}>
+            <Text style={styles.bacDetailText}>Limit: {drivingLimit.toFixed(2)}%</Text>
+            <Text style={styles.bacDetailTextDivider}>|</Text>
+            <Text style={styles.bacDetailText}>Peak: {projectedPeak}%</Text>
+          </View>
+          <View style={styles.bacDetailsRow}>
+            <Text style={styles.bacDetailText}>Sober in: {timeToSober}</Text>
+          </View>
 
-        <View style={styles.bacDetailsRow}>
-          <Text style={styles.bacDetailText}>Sober in: {timeToSober}</Text>
+          {bacChartData.datasets[0].data.length > 1 && (
+            <LineChart
+              data={bacChartData}
+              width={screenWidth - 80} 
+              height={180} // Increased height to prevent time clipping
+              withDots={true}
+              withInnerLines={false}
+              withOuterLines={false}
+              bezier 
+              chartConfig={{
+                backgroundColor: '#343a40',
+                backgroundGradientFrom: '#343a40',
+                backgroundGradientTo: '#343a40',
+                decimalPlaces: 3,
+                color: (opacity = 1) => bacColor, 
+                labelColor: (opacity = 1) => '#adb5bd',
+                propsForDots: { r: "4", strokeWidth: "2", stroke: bacColor }
+              }}
+              style={{ marginVertical: 15, borderRadius: 10 }}
+            />
+          )}
+          <Text style={{color: '#6c757d', fontSize: 10, fontStyle: 'italic', marginTop: 5}}>Tap card for details & bigger chart</Text>
         </View>
-      </View>
+      </TouchableOpacity>
 
       <Button title="+ Add Drink" onPress={() => setIsModalVisible(true)} color="#007BFF" />
-      
       <Text style={styles.subtitle}>Recent Drinks:</Text>
       
       {activeDrinkCount > 0 && (
         <View style={styles.activeWarningBanner}>
-          <Text style={styles.activeWarningText}>
-            ⚠️ You have {activeDrinkCount} unfinished drink{activeDrinkCount > 1 ? 's' : ''}
-          </Text>
+          <Text style={styles.activeWarningText}>⚠️ You have {activeDrinkCount} unfinished drink{activeDrinkCount > 1 ? 's' : ''}</Text>
         </View>
       )}
-
       <Text style={styles.hintText}>(Press and hold a drink to delete it)</Text>
 
-      <FlatList 
-        data={sortedDrinks} 
-        keyExtractor={(item) => item.id} 
-        renderItem={renderDrinkItem} 
-        style={styles.list} 
-      />
+      <FlatList data={sortedDrinks} keyExtractor={(item) => item.id} renderItem={renderDrinkItem} style={styles.list} />
 
       <Modal visible={isModalVisible} animationType="slide" transparent={true}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <Text style={styles.modalTitle}>Log a Drink</Text>
-            
             <Text style={styles.label}>Quick Select:</Text>
             <View style={styles.presetGrid}>
               {PRESET_DRINKS.map((drink, index) => (
@@ -424,10 +411,8 @@ export default function DashboardScreen() {
                 </TouchableOpacity>
               ))}
             </View>
-            
             <Text style={styles.label}>Drink Name:</Text>
             <TextInput style={styles.input} value={drinkName} onChangeText={setDrinkName} placeholder="e.g. Beer" />
-            
             <View style={styles.inputRow}>
               <View style={styles.halfInput}>
                 <Text style={styles.label}>Volume (ml):</Text>
@@ -438,38 +423,17 @@ export default function DashboardScreen() {
                 <TextInput style={styles.input} keyboardType="numeric" value={drinkAbv} onChangeText={setDrinkAbv} placeholder="e.g. 5.0" />
               </View>
             </View>
-
             <Text style={styles.label}>Stomach Content:</Text>
             <View style={styles.presetGrid}>
-              <TouchableOpacity 
-                style={[styles.foodButton, stomachContent === 0 && styles.foodButtonActive]} 
-                onPress={() => setStomachContent(0)}
-              >
-                <Text style={[styles.foodButtonText, stomachContent === 0 && styles.foodButtonTextActive]}>Empty (0%)</Text>
-              </TouchableOpacity>
-              
-              <TouchableOpacity 
-                style={[styles.foodButton, stomachContent === 0.25 && styles.foodButtonActive]} 
-                onPress={() => setStomachContent(0.25)}
-              >
-                <Text style={[styles.foodButtonText, stomachContent === 0.25 && styles.foodButtonTextActive]}>Snack (25%)</Text>
-              </TouchableOpacity>
-              
-              <TouchableOpacity 
-                style={[styles.foodButton, stomachContent === 0.5 && styles.foodButtonActive]} 
-                onPress={() => setStomachContent(0.5)}
-              >
-                <Text style={[styles.foodButtonText, stomachContent === 0.5 && styles.foodButtonTextActive]}>Moderate (50%)</Text>
-              </TouchableOpacity>
-              
-              <TouchableOpacity 
-                style={[styles.foodButton, stomachContent === 1 && styles.foodButtonActive]} 
-                onPress={() => setStomachContent(1)}
-              >
-                <Text style={[styles.foodButtonText, stomachContent === 1 && styles.foodButtonTextActive]}>Full (100%)</Text>
-              </TouchableOpacity>
+              {[0, 0.25, 0.5, 1].map((val, idx) => {
+                const labels = ["Empty (0%)", "Snack (25%)", "Moderate (50%)", "Full (100%)"];
+                return (
+                  <TouchableOpacity key={idx} style={[styles.foodButton, stomachContent === val && styles.foodButtonActive]} onPress={() => setStomachContent(val)}>
+                    <Text style={[styles.foodButtonText, stomachContent === val && styles.foodButtonTextActive]}>{labels[idx]}</Text>
+                  </TouchableOpacity>
+                );
+              })}
             </View>
-
             <View style={styles.modalButtonRow}>
               <Button title="Cancel" color="#dc3545" onPress={() => setIsModalVisible(false)} />
               <Button title="Log Drink" color="#28a745" onPress={logCustomDrink} />
@@ -477,6 +441,70 @@ export default function DashboardScreen() {
           </View>
         </View>
       </Modal>
+
+      {/* --- REPAIRED: ACTIVE DRINK IMPACT MODAL --- */}
+      <Modal visible={isDetailsModalVisible} animationType="fade" transparent={true}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Bloodstream Analysis</Text>
+
+            {/* NEW: Massive, clean chart rendered specifically for the modal */}
+            {bacChartData.datasets[0].data.length > 1 && (
+              <View style={{ alignItems: 'center', marginBottom: 20 }}>
+                <LineChart
+                  data={bacChartData}
+                  width={screenWidth * 0.75} // Perfectly scaled to fit inside the modal
+                  height={220}
+                  withDots={true}
+                  bezier
+                  chartConfig={{
+                    backgroundColor: '#ffffff',
+                    backgroundGradientFrom: '#ffffff',
+                    backgroundGradientTo: '#ffffff',
+                    decimalPlaces: 3,
+                    color: (opacity = 1) => bacColor,
+                    labelColor: (opacity = 1) => '#333',
+                    propsForDots: { r: "4", strokeWidth: "2", stroke: bacColor }
+                  }}
+                  style={{ borderRadius: 10, alignSelf: 'center' }}
+                />
+                <Text style={{ fontSize: 12, color: '#888', marginTop: 5 }}>
+                  Grey line indicates the {drivingLimit.toFixed(2)}% limit
+                </Text>
+              </View>
+            )}
+
+            <Text style={{marginBottom: 10, color: '#666', textAlign: 'center', fontWeight: 'bold'}}>
+              Drinks from the last 24 hours currently affecting your BAC:
+            </Text>
+            
+            <ScrollView style={{maxHeight: 200, width: '100%'}}>
+              {consumedDrinks.filter(d => (d.endTime ? d.endTime : Date.now()) > Date.now() - (24 * 60 * 60 * 1000)).map((drink) => {
+                 const totalGrams = drink.volume * (drink.abv / 100) * 0.789;
+                 const weightToUse = userWeight > 0 ? userWeight : 75;
+                 const r = userGender.toUpperCase().startsWith('F') ? 0.55 : 0.68;
+                 const maxBacImpact = (totalGrams / (weightToUse * r * 10)).toFixed(3);
+                 return (
+                   <View key={drink.id} style={{padding: 10, borderBottomWidth: 1, borderColor: '#eee'}}>
+                     <Text style={{fontWeight: 'bold', fontSize: 16}}>{drink.name}</Text>
+                     <Text style={{color: '#555'}}>Time: {new Date(drink.startTime).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</Text>
+                     <Text style={{color: '#d63384', fontWeight: 'bold'}}>Total Potential BAC Impact: +{maxBacImpact}%</Text>
+                   </View>
+                 );
+              })}
+              {consumedDrinks.filter(d => (d.endTime ? d.endTime : Date.now()) > Date.now() - (24 * 60 * 60 * 1000)).length === 0 && (
+                <Text style={{textAlign: 'center', color: '#888', marginTop: 20}}>No recent drinks in your bloodstream.</Text>
+              )}
+            </ScrollView>
+
+            <View style={{marginTop: 20}}>
+              {/* FIXED: The trap door is open. (false) */}
+              <Button title="Close" color="#007BFF" onPress={() => setIsDetailsModalVisible(false)} /> 
+            </View>
+          </View>
+        </View>
+      </Modal>
+
     </View>
   );
 }
@@ -492,7 +520,7 @@ const styles = StyleSheet.create({
   bacDetailsRow: { flexDirection: 'row', marginTop: 10, alignItems: 'center' },
   bacDetailText: { color: '#ced4da', fontSize: 14, fontWeight: '500' },
   bacDetailTextDivider: { color: '#6c757d', fontSize: 14, marginHorizontal: 10 },
-  subtitle: { fontSize: 18, fontWeight: 'bold', marginTop: 25, marginBottom: 5 },
+  subtitle: { fontSize: 18, fontWeight: 'bold', marginTop: 10, marginBottom: 5 },
   hintText: { fontSize: 12, color: '#888', marginBottom: 10, fontStyle: 'italic' },
   activeWarningBanner: { backgroundColor: '#fff3cd', paddingVertical: 8, paddingHorizontal: 12, borderRadius: 6, marginBottom: 5, borderWidth: 1, borderColor: '#ffe69c' },
   activeWarningText: { color: '#856404', fontWeight: 'bold', fontSize: 14, textAlign: 'center' },
@@ -505,7 +533,7 @@ const styles = StyleSheet.create({
   foodDetails: { fontSize: 13, color: '#856404', marginTop: 5, fontWeight: '600', backgroundColor: '#fff3cd', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 4, alignSelf: 'flex-start' },
   finishButtonContainer: { marginTop: 15 },
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0, 0, 0, 0.5)', justifyContent: 'center', alignItems: 'center' },
-  modalContent: { backgroundColor: 'white', padding: 25, borderRadius: 15, width: '85%' },
+  modalContent: { backgroundColor: 'white', padding: 25, borderRadius: 15, width: '90%' },
   modalTitle: { fontSize: 22, fontWeight: 'bold', marginBottom: 20, textAlign: 'center' },
   label: { fontSize: 16, marginBottom: 5, fontWeight: '500' },
   input: { borderWidth: 1, borderColor: '#cccccc', padding: 10, marginBottom: 15, borderRadius: 8, fontSize: 16 },

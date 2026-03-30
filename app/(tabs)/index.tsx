@@ -1,4 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Notifications from 'expo-notifications';
 import React, { useEffect, useState } from 'react';
 import { Alert, Button, FlatList, Modal, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
@@ -58,6 +59,28 @@ export default function DashboardScreen() {
     }, 60000);
     return () => clearInterval(interval);
   }, [consumedDrinks, userWeight, userGender, userRegion]); 
+
+/// --- THE LISTENER: Catches button presses from the Lock Screen ---
+  useEffect(() => {
+    const subscription = Notifications.addNotificationResponseReceivedListener(response => {
+      const actionId = response.actionIdentifier;
+      const drinkId = response.notification.request.content.data?.drinkId as string; 
+
+      if (!drinkId) return;
+
+      if (actionId === 'FINISH_DRINK') {
+        finishDrink(drinkId);
+      } else if (actionId === 'FINISH_AND_NEW') {
+        // Trigger our new background looper!
+        finishAndRepeatDrink(drinkId);
+      }
+    });
+
+    return () => subscription.remove();
+  }, []);
+
+
+
 
   const loadDrinksAndSettings = async () => {
     try {
@@ -183,8 +206,10 @@ export default function DashboardScreen() {
   };
 
   const logCustomDrink = async () => {
+    const newDrinkId = Date.now().toString(); // Generate ID first so we can attach it to the notification
+    
     const newDrink = {
-      id: Date.now().toString(), 
+      id: newDrinkId, 
       name: drinkName || 'Unknown Drink', 
       volume: parseFloat(drinkVolume) || 0, 
       abv: parseFloat(drinkAbv) || 0,    
@@ -202,18 +227,91 @@ export default function DashboardScreen() {
       setDrinkAbv(''); 
       setStomachContent(0); 
       setIsModalVisible(false);
+
+      // --- NEW: Fire the Live Notification! ---
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: "🍺 Active Drink",
+          body: `You are currently drinking: ${newDrink.name}. Don't forget to finish it!`,
+          categoryIdentifier: 'ACTIVE_DRINK', // This tells Android to attach our "Finish Drink" button
+          data: { drinkId: newDrinkId },      // We hide the ID in the data so the background task knows which drink to finish
+          autoDismiss: false,                 // Try to keep it on the lock screen
+          sticky: true,
+        },
+        trigger: null, // trigger: null means "Fire it immediately"
+      });
+
     } catch (error) {}
   };
 
   const finishDrink = async (drinkId: string) => {
-    const updatedList = consumedDrinks.map(drink => {
-      if (drink.id === drinkId) return { ...drink, endTime: Date.now() }; 
-      return drink;
+    // CLEANUP CREW: Remove the notification from the lock screen!
+    await Notifications.dismissAllNotificationsAsync();
+
+    // Use 'prevDrinks' to ensure we never overwrite data if the app was asleep
+    setConsumedDrinks((prevDrinks) => {
+      const updatedList = prevDrinks.map(drink => {
+        if (drink.id === drinkId) return { ...drink, endTime: Date.now() }; 
+        return drink;
+      });
+      
+      AsyncStorage.setItem('drinkHistory', JSON.stringify(updatedList)).catch(()=>{});
+      return updatedList;
     });
-    setConsumedDrinks(updatedList);
-    try { await AsyncStorage.setItem('drinkHistory', JSON.stringify(updatedList)); } 
-    catch (error) {}
   };
+
+  const finishAndRepeatDrink = async (drinkId: string) => {
+    // 1. Clear the old notification
+    await Notifications.dismissAllNotificationsAsync();
+
+    try {
+      // 2. Fetch the most reliable data directly from the hard drive
+      const storedData = await AsyncStorage.getItem('drinkHistory');
+      if (!storedData) return;
+      let history: Drink[] = JSON.parse(storedData);
+
+      // 3. Find the drink they just finished
+      const drinkToRepeat = history.find((d) => d.id === drinkId);
+      if (!drinkToRepeat) return;
+
+      // 4. Mark the old one as finished
+      history = history.map((d) => d.id === drinkId ? { ...d, endTime: Date.now() } : d);
+
+      // 5. Create the exact duplicate
+      const newDrinkId = Date.now().toString();
+      const newDrink = {
+        id: newDrinkId,
+        name: drinkToRepeat.name,
+        volume: drinkToRepeat.volume,
+        abv: drinkToRepeat.abv,
+        startTime: Date.now(),
+        endTime: null,
+        stomachContent: drinkToRepeat.stomachContent
+      };
+      
+      history.push(newDrink);
+
+      // 6. Save back to database and safely update React State
+      await AsyncStorage.setItem('drinkHistory', JSON.stringify(history));
+      setConsumedDrinks(history);
+
+      // 7. Fire the NEW notification for the new drink
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: "🍺 Active Drink",
+          body: `You are currently drinking: ${newDrink.name}. Don't forget to finish it!`,
+          categoryIdentifier: 'ACTIVE_DRINK',
+          data: { drinkId: newDrinkId },
+          autoDismiss: false,
+          sticky: true,
+        },
+        trigger: null,
+      });
+    } catch (error) {
+      console.error("Failed to repeat drink", error);
+    }
+  };
+
 
   const deleteDrink = (idToDelete: string) => {
     Alert.alert("Delete Drink", "Are you sure you want to remove this entry?", [

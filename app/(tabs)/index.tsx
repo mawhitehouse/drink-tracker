@@ -106,7 +106,6 @@ export default function DashboardScreen() {
       if (savedGender) setUserGender(savedGender);
       
       if (savedPresets) {
-        // ALWAYS sort alphabetically when loading
         const parsedPresets: Preset[] = JSON.parse(savedPresets);
         parsedPresets.sort((a, b) => a.name.localeCompare(b.name));
         setCustomPresets(parsedPresets); 
@@ -276,6 +275,32 @@ export default function DashboardScreen() {
     } catch (error) {}
   };
 
+  // --- NEW: UI Have Another Function ---
+  const haveAnother = async (drink: Drink) => {
+    const newDrinkId = Date.now().toString(); 
+    const newDrink = {
+      id: newDrinkId, 
+      name: drink.name, 
+      volume: drink.volume, 
+      abv: drink.abv, 
+      startTime: Date.now(), 
+      endTime: null, 
+      stomachContent: drink.stomachContent 
+    };
+    
+    const updatedDrinksList = [...consumedDrinks, newDrink];
+    setConsumedDrinks(updatedDrinksList);
+    try {
+      await AsyncStorage.setItem('drinkHistory', JSON.stringify(updatedDrinksList));
+      
+      // Dispatch the live notification for the new drink
+      await Notifications.scheduleNotificationAsync({
+        content: { title: "🍺 Active Drink", body: `Drinking: ${newDrink.name}.`, categoryIdentifier: 'ACTIVE_DRINK', data: { drinkId: newDrinkId }, autoDismiss: false, sticky: true },
+        trigger: null, 
+      });
+    } catch (error) {}
+  };
+
   const saveAsPreset = async () => {
     if (!drinkName || !drinkVolume || !drinkAbv) {
       Alert.alert("Missing Details", "Please enter a Name, Volume, and ABV to save as a preset.");
@@ -290,7 +315,6 @@ export default function DashboardScreen() {
       return;
     }
 
-    // ALWAYS sort alphabetically when saving
     const updatedPresets = [...customPresets, newPreset].sort((a, b) => a.name.localeCompare(b.name));
     
     setCustomPresets(updatedPresets);
@@ -378,9 +402,14 @@ export default function DashboardScreen() {
           <Text style={styles.timeDetails}>Started: {startString} {item.endTime ? `• Finished: ${endString}` : ''}</Text>
           <Text style={styles.foodDetails}>{foodStatusText}</Text>
           
-          {item.endTime === null && (
-            <View style={styles.finishButtonContainer}>
+          {/* UPDATED: Dynamic Button Rendering */}
+          {item.endTime === null ? (
+            <View style={styles.actionButtonContainer}>
               <Button title="Finish Drink" color="#ff9800" onPress={() => finishDrink(item.id)} />
+            </View>
+          ) : (
+            <View style={styles.actionButtonContainer}>
+              <Button title="Have Another 🍻" color="#28a745" onPress={() => haveAnother(item)} />
             </View>
           )}
         </View>
@@ -642,7 +671,7 @@ const styles = StyleSheet.create({
   drinkDetails: { fontSize: 14, color: '#666666', marginTop: 5 },
   timeDetails: { fontSize: 14, color: '#17a2b8', marginTop: 5, fontWeight: '500' },
   foodDetails: { fontSize: 13, color: '#856404', marginTop: 5, fontWeight: '600', backgroundColor: '#fff3cd', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 4, alignSelf: 'flex-start' },
-  finishButtonContainer: { marginTop: 15 },
+  actionButtonContainer: { marginTop: 15 },
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0, 0, 0, 0.5)', justifyContent: 'center', alignItems: 'center' },
   modalContent: { backgroundColor: 'white', padding: 25, borderRadius: 15, width: '90%', maxHeight: '90%' },
   modalTitle: { fontSize: 22, fontWeight: 'bold', marginBottom: 20, textAlign: 'center' },

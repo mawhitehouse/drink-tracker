@@ -16,6 +16,7 @@ const screenWidth = Dimensions.get('window').width;
 export default function StatsScreen() {
   const [drinks, setDrinks] = useState<Drink[]>([]);
   const [region, setRegion] = useState('NZ/AU');
+  const [startHour, setStartHour] = useState(5); // NEW: State for the offset
   const [timeframe, setTimeframe] = useState<'Daily' | 'Weekly' | 'Monthly' | 'Yearly'>('Daily');
   const scrollViewRef = useRef<ScrollView>(null);
 
@@ -35,8 +36,11 @@ export default function StatsScreen() {
     try {
       const savedDrinks = await AsyncStorage.getItem('drinkHistory');
       const savedRegion = await AsyncStorage.getItem('userRegion');
+      const savedStart = await AsyncStorage.getItem('startOfDay'); // NEW: Fetch custom time
+      
       if (savedDrinks) setDrinks(JSON.parse(savedDrinks));
       if (savedRegion) setRegion(savedRegion);
+      if (savedStart) setStartHour(parseInt(savedStart, 10)); // Ensure it is a number
     } catch (error) {
       Alert.alert('Error', 'Failed to load data for charts.');
     }
@@ -53,27 +57,29 @@ export default function StatsScreen() {
   const getChartData = () => {
     let labels: string[] = [];
     let values: number[] = [];
-    const now = new Date();
+    
+    // THE DYNAMIC SHIFT: Uses the user's custom profile setting!
+    const START_OF_DAY_OFFSET = startHour * 60 * 60 * 1000; 
+    const adjustedNow = new Date(Date.now() - START_OF_DAY_OFFSET);
 
     if (drinks.length === 0) {
       return { labels: ['Today'], datasets: [{ data: [0] }] };
     }
 
-    // FIX 1: Filter out any rogue "1970" dates caused by empty CSV rows (only keep post-2010 data)
     const validDrinks = drinks.filter(d => d.startTime > 1262304000000); 
-    const oldestDrinkTime = validDrinks.length > 0 ? Math.min(...validDrinks.map(d => d.startTime)) : now.getTime();
+    const oldestDrinkTime = validDrinks.length > 0 ? Math.min(...validDrinks.map(d => d.startTime - START_OF_DAY_OFFSET)) : adjustedNow.getTime();
     const oldestDate = new Date(oldestDrinkTime);
 
     if (timeframe === 'Daily') {
-      const daysToGenerate = 30; // Reduced to 30 days for a cleaner daily view
+      const daysToGenerate = 30; 
       for (let i = daysToGenerate - 1; i >= 0; i--) {
-        const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
+        const d = new Date(adjustedNow.getFullYear(), adjustedNow.getMonth(), adjustedNow.getDate() - i);
         labels.push(`${d.getDate()}/${d.getMonth() + 1}`); 
         values.push(0);
       }
       validDrinks.forEach(drink => {
-        const d = new Date(drink.startTime);
-        const diffTime = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() - new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+        const d = new Date(drink.startTime - START_OF_DAY_OFFSET); 
+        const diffTime = new Date(adjustedNow.getFullYear(), adjustedNow.getMonth(), adjustedNow.getDate()).getTime() - new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
         const diffDays = Math.round(diffTime / (1000 * 60 * 60 * 24));
         if (diffDays >= 0 && diffDays < daysToGenerate) {
           values[daysToGenerate - 1 - diffDays] += calculateStandardDrinks(drink.volume, drink.abv, region);
@@ -87,14 +93,14 @@ export default function StatsScreen() {
         values.push(0);
       }
       
-      const startOfThisWeek = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const startOfThisWeek = new Date(adjustedNow.getFullYear(), adjustedNow.getMonth(), adjustedNow.getDate());
       const dayOfWeek = startOfThisWeek.getDay();
       const diffToMonday = dayOfWeek === 0 ? -6 : 1 - dayOfWeek; 
       startOfThisWeek.setDate(startOfThisWeek.getDate() + diffToMonday);
       startOfThisWeek.setHours(0, 0, 0, 0);
 
       validDrinks.forEach(drink => {
-        const d = new Date(drink.startTime);
+        const d = new Date(drink.startTime - START_OF_DAY_OFFSET); 
         const diffTime = startOfThisWeek.getTime() - d.getTime();
         let diffWeeks = Math.ceil(diffTime / (1000 * 60 * 60 * 24 * 7));
         
@@ -106,39 +112,37 @@ export default function StatsScreen() {
       });
 
     } else if (timeframe === 'Monthly') {
-      let totalMonths = (now.getFullYear() - oldestDate.getFullYear()) * 12 + (now.getMonth() - oldestDate.getMonth()) + 1;
+      let totalMonths = (adjustedNow.getFullYear() - oldestDate.getFullYear()) * 12 + (adjustedNow.getMonth() - oldestDate.getMonth()) + 1;
       
-      // FIX 2: Strict Memory Cap to prevent SVG crashing
-      if (totalMonths > 36) totalMonths = 36; // Max 3 years of monthly data
+      if (totalMonths > 36) totalMonths = 36; 
       if (totalMonths < 6) totalMonths = 6; 
 
       for (let i = totalMonths - 1; i >= 0; i--) {
-        const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        const d = new Date(adjustedNow.getFullYear(), adjustedNow.getMonth() - i, 1);
         labels.push(`${d.toLocaleDateString(undefined, { month: 'short' })}\n'${d.getFullYear().toString().slice(-2)}`);
         values.push(0);
       }
       validDrinks.forEach(drink => {
-        const d = new Date(drink.startTime);
-        const monthDiff = (now.getFullYear() - d.getFullYear()) * 12 + (now.getMonth() - d.getMonth());
+        const d = new Date(drink.startTime - START_OF_DAY_OFFSET); 
+        const monthDiff = (adjustedNow.getFullYear() - d.getFullYear()) * 12 + (adjustedNow.getMonth() - d.getMonth());
         if (monthDiff >= 0 && monthDiff < totalMonths) {
           values[totalMonths - 1 - monthDiff] += calculateStandardDrinks(drink.volume, drink.abv, region);
         }
       });
 
     } else if (timeframe === 'Yearly') {
-      let totalYears = now.getFullYear() - oldestDate.getFullYear() + 1;
+      let totalYears = adjustedNow.getFullYear() - oldestDate.getFullYear() + 1;
       
-      // FIX 3: Strict Memory Cap to prevent endless scrolling
       if (totalYears > 15) totalYears = 15; 
       if (totalYears < 5) totalYears = 5; 
 
-      const currentYear = now.getFullYear();
+      const currentYear = adjustedNow.getFullYear();
       for (let i = totalYears - 1; i >= 0; i--) {
         labels.push((currentYear - i).toString());
         values.push(0);
       }
       validDrinks.forEach(drink => {
-        const d = new Date(drink.startTime);
+        const d = new Date(drink.startTime - START_OF_DAY_OFFSET); 
         const yearDiff = currentYear - d.getFullYear();
         if (yearDiff >= 0 && yearDiff < totalYears) {
           values[totalYears - 1 - yearDiff] += calculateStandardDrinks(drink.volume, drink.abv, region);
@@ -188,8 +192,8 @@ export default function StatsScreen() {
             yAxisLabel=""
             yAxisSuffix=""
             fromZero={true}
-            showValuesOnTopOfBars={true} // FIX 4: Numbers directly on the bars!
-            withHorizontalLabels={false} // Hides the clunky left-hand Y-Axis
+            showValuesOnTopOfBars={true} 
+            withHorizontalLabels={false} 
             chartConfig={{
               backgroundColor: '#ffffff',
               backgroundGradientFrom: '#ffffff',

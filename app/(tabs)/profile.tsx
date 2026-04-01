@@ -22,6 +22,7 @@ export default function ProfileScreen() {
   const [height, setHeight] = useState('');
   const [gender, setGender] = useState('');
   const [region, setRegion] = useState('NZ/AU');
+  const [startHour, setStartHour] = useState('5'); // <-- NEW STATE
 
   useEffect(() => {
     loadProfileData();
@@ -33,11 +34,13 @@ export default function ProfileScreen() {
       const savedHeight = await AsyncStorage.getItem('userHeight');
       const savedGender = await AsyncStorage.getItem('userGender');
       const savedRegion = await AsyncStorage.getItem('userRegion'); 
+      const savedStart = await AsyncStorage.getItem('startOfDay'); // <-- NEW FETCH
       
       if (savedWeight !== null) setWeight(savedWeight);
       if (savedHeight !== null) setHeight(savedHeight);
       if (savedGender !== null) setGender(savedGender);
       if (savedRegion !== null) setRegion(savedRegion);
+      if (savedStart !== null) setStartHour(savedStart); // <-- NEW SET
     } catch (error) {
       Alert.alert('Error', 'Failed to load profile data.');
     }
@@ -49,6 +52,7 @@ export default function ProfileScreen() {
       await AsyncStorage.setItem('userHeight', height);
       await AsyncStorage.setItem('userGender', gender);
       await AsyncStorage.setItem('userRegion', region); 
+      await AsyncStorage.setItem('startOfDay', startHour); // <-- NEW SAVE
       
       Alert.alert('Success', 'Profile saved to your phone!');
     } catch (error) {
@@ -71,21 +75,17 @@ export default function ProfileScreen() {
     const lines = csvString.split(/\r?\n/).filter(line => line.trim() !== '');
     if (lines.length < 2) return []; 
 
-    // --- NEW: Universal Time Translator ---
     const parseTime = (timeStr: string) => {
       if (!timeStr) return null;
       
-      // Strip out any rogue single or double quotes from the spreadsheet
       const cleanStr = timeStr.replace(/['"]/g, '').trim(); 
       if (!cleanStr) return null;
 
-      // If it looks like a human date (has dashes or colons)
       if (cleanStr.includes('-') || cleanStr.includes(':')) {
         const parsedMs = new Date(cleanStr).getTime();
         return isNaN(parsedMs) ? null : parsedMs;
       }
       
-      // Otherwise, assume it's already Unix milliseconds
       const parsedNum = parseInt(cleanStr, 10);
       return isNaN(parsedNum) ? null : parsedNum;
     };
@@ -131,7 +131,7 @@ export default function ProfileScreen() {
         Alert.alert('Error', 'Sharing is not available on this device');
       }
     } catch (error) {
-      console.error("Export Error:", error); // <-- This will print the exact crash reason in your terminal
+      console.error("Export Error:", error); 
       Alert.alert('Error', 'Could not export data.');
     }
   };
@@ -146,7 +146,6 @@ export default function ProfileScreen() {
       if (result.canceled === false && result.assets && result.assets.length > 0) {
         const fileUri = result.assets[0].uri;
         
-        // 2. TS FIX: Use the raw string 'utf8' here as well
         const fileContent = await FileSystem.readAsStringAsync(fileUri, { encoding: 'utf8' });
         
         const newDrinks = parseCSV(fileContent);
@@ -215,6 +214,27 @@ export default function ProfileScreen() {
         ))}
       </View>
 
+      {/* --- NEW UI COMPONENT --- */}
+      <View style={styles.settingCard}>
+        <Text style={styles.label}>Start of Day (Reset Time)</Text>
+        <Text style={styles.helperText}>
+          Drinks logged before this time count towards the previous day.
+        </Text>
+        <View style={styles.hourGrid}>
+          {['0', '3', '5', '7'].map((hour) => (
+            <TouchableOpacity 
+              key={hour} 
+              style={[styles.hourButton, startHour === hour && styles.activeHourButton]}
+              onPress={() => setStartHour(hour)}
+            >
+              <Text style={[styles.hourButtonText, startHour === hour && styles.activeHourButtonText]}>
+                {hour === '0' ? 'Midnight' : `${hour}:00 AM`}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      </View>
+
       <Button title="Save Profile" onPress={saveProfileData} color="#007BFF" />
 
       <View style={styles.dataSection}>
@@ -248,6 +268,16 @@ const styles = StyleSheet.create({
   activeRegionButton: { backgroundColor: '#007BFF' }, 
   regionText: { color: '#495057', fontWeight: 'bold' },
   activeRegionText: { color: '#ffffff' },
+  
+  /* NEW STYLES FOR START OF DAY */
+  settingCard: { marginBottom: 25 },
+  helperText: { fontSize: 12, color: '#888', marginBottom: 10 },
+  hourGrid: { flexDirection: 'row', justifyContent: 'space-between' },
+  hourButton: { paddingVertical: 10, flex: 1, marginHorizontal: 2, borderRadius: 8, alignItems: 'center', backgroundColor: '#e9ecef' },
+  activeHourButton: { backgroundColor: '#007BFF' },
+  hourButtonText: { fontWeight: 'bold', color: '#495057' },
+  activeHourButtonText: { color: '#ffffff' },
+
   dataSection: { marginTop: 40, paddingTop: 20, borderTopWidth: 1, borderColor: '#e9ecef' },
   dataTitle: { fontSize: 20, fontWeight: 'bold', marginBottom: 10 },
   dataDescription: { fontSize: 14, color: '#6c757d', marginBottom: 20, lineHeight: 20 },

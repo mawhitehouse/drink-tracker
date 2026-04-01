@@ -15,7 +15,13 @@ type Drink = {
   stomachContent?: number;    
 };
 
-const PRESET_DRINKS = [
+type Preset = {
+  name: string;
+  volume: string;
+  abv: string;
+};
+
+const DEFAULT_PRESETS: Preset[] = [
   { name: 'Standard Beer', volume: '330', abv: '5.0' },
   { name: 'Cocktail', volume: '200', abv: '15.0' },
   { name: 'Glass of Wine', volume: '150', abv: '12.5' },
@@ -34,6 +40,8 @@ const calculateStandardDrinks = (volume: number, abv: number, region: string) =>
 
 export default function DashboardScreen() {
   const [consumedDrinks, setConsumedDrinks] = useState<Drink[]>([]);
+  const [customPresets, setCustomPresets] = useState<Preset[]>([]); 
+  
   const [userRegion, setUserRegion] = useState('NZ/AU');
   const [userWeight, setUserWeight] = useState(0);
   const [userGender, setUserGender] = useState('M');
@@ -50,6 +58,7 @@ export default function DashboardScreen() {
 
   const [isModalVisible, setIsModalVisible] = useState(false);
   const [isDetailsModalVisible, setIsDetailsModalVisible] = useState(false); 
+  const [isCustomPresetModalVisible, setIsCustomPresetModalVisible] = useState(false); 
 
   const [drinkName, setDrinkName] = useState(''); 
   const [drinkVolume, setDrinkVolume] = useState('');
@@ -89,11 +98,19 @@ export default function DashboardScreen() {
       const savedRegion = await AsyncStorage.getItem('userRegion');
       const savedWeight = await AsyncStorage.getItem('userWeight');
       const savedGender = await AsyncStorage.getItem('userGender');
+      const savedPresets = await AsyncStorage.getItem('customPresets'); 
       
       if (savedDrinks) setConsumedDrinks(JSON.parse(savedDrinks));
       if (savedRegion) setUserRegion(savedRegion);
       if (savedWeight) setUserWeight(parseFloat(savedWeight));
       if (savedGender) setUserGender(savedGender);
+      
+      if (savedPresets) {
+        // ALWAYS sort alphabetically when loading
+        const parsedPresets: Preset[] = JSON.parse(savedPresets);
+        parsedPresets.sort((a, b) => a.name.localeCompare(b.name));
+        setCustomPresets(parsedPresets); 
+      }
     } catch (error) {}
   };
 
@@ -219,7 +236,7 @@ export default function DashboardScreen() {
         
         labels.push(new Date(roundedTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
         data.push(parseFloat(bacAtPoint.toFixed(3)));
-        limitLineData.push(limit); // Generate the horizontal line!
+        limitLineData.push(limit); 
       }
       
       setBacChartData({ 
@@ -235,9 +252,14 @@ export default function DashboardScreen() {
   };
 
   const logCustomDrink = async () => {
+    if (!drinkName || !drinkVolume || !drinkAbv) {
+      Alert.alert("Missing Details", "Please fill out the name, volume, and ABV.");
+      return;
+    }
+
     const newDrinkId = Date.now().toString(); 
     const newDrink = {
-      id: newDrinkId, name: drinkName || 'Unknown Drink', volume: parseFloat(drinkVolume) || 0, abv: parseFloat(drinkAbv) || 0, startTime: Date.now(), endTime: null, stomachContent: stomachContent 
+      id: newDrinkId, name: drinkName, volume: parseFloat(drinkVolume) || 0, abv: parseFloat(drinkAbv) || 0, startTime: Date.now(), endTime: null, stomachContent: stomachContent 
     };
     
     const updatedDrinksList = [...consumedDrinks, newDrink];
@@ -252,6 +274,41 @@ export default function DashboardScreen() {
         trigger: null, 
       });
     } catch (error) {}
+  };
+
+  const saveAsPreset = async () => {
+    if (!drinkName || !drinkVolume || !drinkAbv) {
+      Alert.alert("Missing Details", "Please enter a Name, Volume, and ABV to save as a preset.");
+      return;
+    }
+    
+    const newPreset = { name: drinkName, volume: drinkVolume, abv: drinkAbv };
+    
+    const isDuplicate = customPresets.some(p => p.name === newPreset.name && p.volume === newPreset.volume && p.abv === newPreset.abv);
+    if (isDuplicate) {
+      Alert.alert("Already Saved", "This exact drink is already in your presets!");
+      return;
+    }
+
+    // ALWAYS sort alphabetically when saving
+    const updatedPresets = [...customPresets, newPreset].sort((a, b) => a.name.localeCompare(b.name));
+    
+    setCustomPresets(updatedPresets);
+    try {
+      await AsyncStorage.setItem('customPresets', JSON.stringify(updatedPresets));
+      Alert.alert("Saved!", `${drinkName} has been saved to your custom presets.`);
+    } catch (error) {}
+  };
+
+  const deleteCustomPreset = (indexToDelete: number) => {
+    Alert.alert("Delete Preset", "Remove this custom drink from your library?", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Delete", style: "destructive", onPress: async () => {
+        const updatedPresets = customPresets.filter((_, idx) => idx !== indexToDelete);
+        setCustomPresets(updatedPresets);
+        await AsyncStorage.setItem('customPresets', JSON.stringify(updatedPresets));
+      }}
+    ]);
   };
 
   const finishDrink = async (drinkId: string) => {
@@ -366,7 +423,7 @@ export default function DashboardScreen() {
             <LineChart
               data={bacChartData}
               width={screenWidth - 80} 
-              height={180} // Increased height to prevent time clipping
+              height={180} 
               withDots={true}
               withInnerLines={false}
               withOuterLines={false}
@@ -399,61 +456,116 @@ export default function DashboardScreen() {
 
       <FlatList data={sortedDrinks} keyExtractor={(item) => item.id} renderItem={renderDrinkItem} style={styles.list} />
 
+      {/* --- ADD DRINK MODAL --- */}
       <Modal visible={isModalVisible} animationType="slide" transparent={true}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>Log a Drink</Text>
-            <Text style={styles.label}>Quick Select:</Text>
-            <View style={styles.presetGrid}>
-              {PRESET_DRINKS.map((drink, index) => (
-                <TouchableOpacity key={index} style={styles.presetButton} onPress={() => applyPreset(drink.name, drink.volume, drink.abv)}>
-                  <Text style={styles.presetText}>{drink.name}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-            <Text style={styles.label}>Drink Name:</Text>
-            <TextInput style={styles.input} value={drinkName} onChangeText={setDrinkName} placeholder="e.g. Beer" />
-            <View style={styles.inputRow}>
-              <View style={styles.halfInput}>
-                <Text style={styles.label}>Volume (ml):</Text>
-                <TextInput style={styles.input} keyboardType="numeric" value={drinkVolume} onChangeText={setDrinkVolume} placeholder="e.g. 330" />
-              </View>
-              <View style={styles.halfInput}>
-                <Text style={styles.label}>ABV (%):</Text>
-                <TextInput style={styles.input} keyboardType="numeric" value={drinkAbv} onChangeText={setDrinkAbv} placeholder="e.g. 5.0" />
-              </View>
-            </View>
-            <Text style={styles.label}>Stomach Content:</Text>
-            <View style={styles.presetGrid}>
-              {[0, 0.25, 0.5, 1].map((val, idx) => {
-                const labels = ["Empty (0%)", "Snack (25%)", "Moderate (50%)", "Full (100%)"];
-                return (
-                  <TouchableOpacity key={idx} style={[styles.foodButton, stomachContent === val && styles.foodButtonActive]} onPress={() => setStomachContent(val)}>
-                    <Text style={[styles.foodButtonText, stomachContent === val && styles.foodButtonTextActive]}>{labels[idx]}</Text>
+            <ScrollView contentContainerStyle={{ paddingBottom: 20 }}>
+              <Text style={styles.modalTitle}>Log a Drink</Text>
+              
+              <Text style={styles.label}>Quick Select:</Text>
+              <View style={styles.presetGrid}>
+                {DEFAULT_PRESETS.map((drink, index) => (
+                  <TouchableOpacity key={index} style={styles.presetButton} onPress={() => applyPreset(drink.name, drink.volume, drink.abv)}>
+                    <Text style={styles.presetText}>{drink.name}</Text>
                   </TouchableOpacity>
-                );
-              })}
-            </View>
-            <View style={styles.modalButtonRow}>
-              <Button title="Cancel" color="#dc3545" onPress={() => setIsModalVisible(false)} />
-              <Button title="Log Drink" color="#28a745" onPress={logCustomDrink} />
-            </View>
+                ))}
+              </View>
+              
+              <Text style={styles.label}>Drink Name:</Text>
+              <TextInput style={styles.input} value={drinkName} onChangeText={setDrinkName} placeholder="e.g. Asahi Super Dry" />
+              
+              <View style={styles.inputRow}>
+                <View style={styles.halfInput}>
+                  <Text style={styles.label}>Volume (ml):</Text>
+                  <TextInput style={styles.input} keyboardType="numeric" value={drinkVolume} onChangeText={setDrinkVolume} placeholder="e.g. 330" />
+                </View>
+                <View style={styles.halfInput}>
+                  <Text style={styles.label}>ABV (%):</Text>
+                  <TextInput style={styles.input} keyboardType="numeric" value={drinkAbv} onChangeText={setDrinkAbv} placeholder="e.g. 5.0" />
+                </View>
+              </View>
+
+              <Text style={styles.label}>Stomach Content:</Text>
+              <View style={styles.presetGrid}>
+                {[0, 0.25, 0.5, 1].map((val, idx) => {
+                  const labels = ["Empty (0%)", "Snack (25%)", "Moderate (50%)", "Full (100%)"];
+                  return (
+                    <TouchableOpacity key={idx} style={[styles.foodButton, stomachContent === val && styles.foodButtonActive]} onPress={() => setStomachContent(val)}>
+                      <Text style={[styles.foodButtonText, stomachContent === val && styles.foodButtonTextActive]}>{labels[idx]}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              
+              <View style={{ marginTop: 10, marginBottom: 20 }}>
+                <TouchableOpacity style={styles.savePresetButton} onPress={saveAsPreset}>
+                  <Text style={styles.savePresetText}>💾 Save as Custom Preset</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity style={styles.pickPresetButton} onPress={() => setIsCustomPresetModalVisible(true)}>
+                  <Text style={styles.pickPresetText}>📂 Pick from Custom Presets</Text>
+                </TouchableOpacity>
+              </View>
+
+              <View style={styles.modalButtonRow}>
+                <Button title="Cancel" color="#dc3545" onPress={() => setIsModalVisible(false)} />
+                <Button title="Log Drink" color="#28a745" onPress={logCustomDrink} />
+              </View>
+            </ScrollView>
           </View>
         </View>
       </Modal>
 
-      {/* --- REPAIRED: ACTIVE DRINK IMPACT MODAL --- */}
+      {/* --- CUSTOM PRESET LIBRARY MODAL --- */}
+      <Modal visible={isCustomPresetModalVisible} animationType="fade" transparent={true}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Your Custom Drinks</Text>
+            <Text style={{textAlign: 'center', color: '#888', fontStyle: 'italic', marginBottom: 15}}>
+              (Press and hold a drink to delete it)
+            </Text>
+
+            {customPresets.length === 0 ? (
+              <Text style={{textAlign: 'center', marginVertical: 30, color: '#666'}}>
+                You haven't saved any custom drinks yet. Fill out a drink and hit "Save as Custom Preset" to build your library!
+              </Text>
+            ) : (
+              <ScrollView style={{maxHeight: 300, width: '100%', marginBottom: 15}}>
+                {customPresets.map((preset, index) => (
+                  <TouchableOpacity 
+                    key={index}
+                    style={styles.customPresetItem}
+                    onPress={() => {
+                      applyPreset(preset.name, preset.volume, preset.abv);
+                      setIsCustomPresetModalVisible(false);
+                    }}
+                    onLongPress={() => deleteCustomPreset(index)}
+                    delayLongPress={500}
+                  >
+                    <Text style={{fontWeight: 'bold', fontSize: 16, color: '#333'}}>{preset.name}</Text>
+                    <Text style={{color: '#666', marginTop: 2}}>{preset.volume}ml • {preset.abv}% ABV</Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            )}
+
+            <Button title="Back to Form" color="#6c757d" onPress={() => setIsCustomPresetModalVisible(false)} />
+          </View>
+        </View>
+      </Modal>
+
+      {/* --- ACTIVE DRINK IMPACT MODAL --- */}
       <Modal visible={isDetailsModalVisible} animationType="fade" transparent={true}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <Text style={styles.modalTitle}>Bloodstream Analysis</Text>
 
-            {/* NEW: Massive, clean chart rendered specifically for the modal */}
             {bacChartData.datasets[0].data.length > 1 && (
               <View style={{ alignItems: 'center', marginBottom: 20 }}>
                 <LineChart
                   data={bacChartData}
-                  width={screenWidth * 0.75} // Perfectly scaled to fit inside the modal
+                  width={screenWidth * 0.75} 
                   height={220}
                   withDots={true}
                   bezier
@@ -498,7 +610,6 @@ export default function DashboardScreen() {
             </ScrollView>
 
             <View style={{marginTop: 20}}>
-              {/* FIXED: The trap door is open. (false) */}
               <Button title="Close" color="#007BFF" onPress={() => setIsDetailsModalVisible(false)} /> 
             </View>
           </View>
@@ -533,12 +644,13 @@ const styles = StyleSheet.create({
   foodDetails: { fontSize: 13, color: '#856404', marginTop: 5, fontWeight: '600', backgroundColor: '#fff3cd', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 4, alignSelf: 'flex-start' },
   finishButtonContainer: { marginTop: 15 },
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0, 0, 0, 0.5)', justifyContent: 'center', alignItems: 'center' },
-  modalContent: { backgroundColor: 'white', padding: 25, borderRadius: 15, width: '90%' },
+  modalContent: { backgroundColor: 'white', padding: 25, borderRadius: 15, width: '90%', maxHeight: '90%' },
   modalTitle: { fontSize: 22, fontWeight: 'bold', marginBottom: 20, textAlign: 'center' },
   label: { fontSize: 16, marginBottom: 5, fontWeight: '500' },
   input: { borderWidth: 1, borderColor: '#cccccc', padding: 10, marginBottom: 15, borderRadius: 8, fontSize: 16 },
   inputRow: { flexDirection: 'row', justifyContent: 'space-between' },
   halfInput: { width: '48%' },
+  
   presetGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', marginBottom: 15 },
   presetButton: { backgroundColor: '#e9ecef', width: '48%', paddingVertical: 12, borderRadius: 8, marginBottom: 10, alignItems: 'center' },
   presetText: { color: '#495057', fontWeight: 'bold' },
@@ -546,5 +658,12 @@ const styles = StyleSheet.create({
   foodButtonActive: { backgroundColor: '#007BFF', borderColor: '#007BFF' },
   foodButtonText: { color: '#495057', fontWeight: 'bold', fontSize: 13 },
   foodButtonTextActive: { color: '#ffffff' },
+
+  savePresetButton: { backgroundColor: '#f8f9fa', padding: 12, borderRadius: 8, alignItems: 'center', marginBottom: 10, borderWidth: 1, borderColor: '#ced4da', borderStyle: 'dashed' },
+  savePresetText: { color: '#495057', fontWeight: '600', fontSize: 14 },
+  pickPresetButton: { backgroundColor: '#e2e3e5', padding: 12, borderRadius: 8, alignItems: 'center', borderWidth: 1, borderColor: '#d3d6d8' },
+  pickPresetText: { color: '#383d41', fontWeight: '600', fontSize: 14 },
+  
+  customPresetItem: { padding: 15, backgroundColor: '#f8f9fa', borderRadius: 10, marginBottom: 10, borderWidth: 1, borderColor: '#e9ecef' },
   modalButtonRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 10 },
 });
